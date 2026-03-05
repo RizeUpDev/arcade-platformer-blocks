@@ -1,26 +1,43 @@
- 
+# Platformer Extension for MakeCode Arcade
 
+Adds advanced platformer mechanics to your game.
 
-> Open this page at [https://rizeupdev.github.io/arcade-platformer-blocks/](https://rizeupdev.github.io/arcade-platformer-blocks/)
+## Features
+- ✅ Custom gravity & jump force
+- ✅ Double jump (configurable max jumps)
+- ✅ Variable-height jumps (hold for higher)
+- ✅ Coyote time (grace period at ledge edges)
+- ✅ Jump buffering (press early, jump on landing)
+- ✅ Wall slide & wall jump
+- ✅ Dash with cooldown
+- ✅ Knockback
+- ✅ Ground/wall/falling/rising detection
 
-## Use as Extension
+## Usage
 
-This repository can be added as an **extension** in MakeCode.
+### Basic Setup
+```blocks
+let hero = sprites.create(heroImage, SpriteKind.Player)
+platformer.setup(hero, 600, -300)
+```
 
-* open [https://arcade.makecode.com/](https://arcade.makecode.com/)
-* click on **New Project**
-* click on **Extensions** under the gearwheel menu
-* search for **https://github.com/rizeupdev/arcade-platformer-blocks** and import
+### Double Jump
+```blocks
+platformer.setMaxJumps(hero, 2)
+```
 
-## Edit this project
+### Controls
+```blocks
+controller.A.onEvent(ControllerButtonEvent.Pressed, function () {
+    platformer.jump(hero)
+})
+controller.A.onEvent(ControllerButtonEvent.Released, function () {
+    platformer.cutJump(hero, 0.5)
+})
+controller.B.onEvent(ControllerButtonEvent.Pressed, function () {
+    platformer.dash(hero)
+})
+```
 
-To edit this repository in MakeCode.
-
-* open [https://arcade.makecode.com/](https://arcade.makecode.com/)
-* click on **Import** then click on **Import URL**
-* paste **https://github.com/rizeupdev/arcade-platformer-blocks** and click import
-
-#### Metadata (used for search, rendering)
-
-* for PXT/arcade
-<script src="https://makecode.com/gh-pages-embed.js"></script><script>makeCodeRender("{{ site.makecode.home_url }}", "{{ site.github.owner_name }}/{{ site.github.repository_name }}");</script>
+## License
+MIT
