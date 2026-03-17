@@ -1,10 +1,34 @@
 //% color="#5C2D91" weight=90 icon="\uf135" block="Platformer"
-//% groups=['Setup', 'Jumping', 'Ladder', 'Wall Mechanics', 'Dash', 'Movement', 'Detection', 'Tweaks', 'Combat']
+//% groups=['Setup', 'Jumping', 'Ladder', 'Slopes', 'Wall Mechanics', 'Dash', 'Movement', 'Detection', 'Tweaks', 'Combat']
 namespace platformer {
+
+    // =========================================================================
+    // Enums
+    // =========================================================================
+
+    export const enum SlopeType {
+        //% block="rising right /"
+        RightRising,
+        //% block="rising left \\"
+        LeftRising,
+        //% block="gentle right low /"
+        GentleRightLow,
+        //% block="gentle right high /"
+        GentleRightHigh,
+        //% block="gentle left high \\"
+        GentleLeftHigh,
+        //% block="gentle left low \\"
+        GentleLeftLow
+    }
 
     // =========================================================================
     // Internal State
     // =========================================================================
+
+    interface SlopeRegistration {
+        tile: Image
+        type: SlopeType
+    }
 
     interface PlatformerState {
         sprite: Sprite
@@ -35,6 +59,9 @@ namespace platformer {
         ladderSnapX: boolean
         ladderCenterX: number
         dismountJumpForce: number
+        // Slopes
+        onSlope: boolean
+        slopeRegistrations: SlopeRegistration[]
     }
 
     const states: PlatformerState[] = []
@@ -70,7 +97,9 @@ namespace platformer {
             climbSpeed: 60,
             ladderSnapX: true,
             ladderCenterX: 0,
-            dismountJumpForce: -280
+            dismountJumpForce: -280,
+            onSlope: false,
+            slopeRegistrations: []
         }
         states.push(ns)
         return ns
@@ -84,6 +113,69 @@ namespace platformer {
     }
 
     // =========================================================================
+    // Slope Helpers
+    // =========================================================================
+
+    /**
+     * Calculate the surface Y of a slope tile given the tile's top-left
+     * position and how far into the tile the sprite's center X falls.
+     * All tiles are 16x16 pixels.
+     *
+     * Tile diagram (16px wide, 16px tall):
+     *
+     *  RightRising (/)          LeftRising (\)
+     *  ............####         ####............
+     *  ........########         ########........
+     *  ################         ################
+     *
+     *  GentleRightLow (/)       GentleRightHigh (/)
+     *  ................         ........########
+     *  ........########         ################
+     *  ################
+     *
+     *  GentleLeftHigh (\)       GentleLeftLow (\)
+     *  ########........         ................
+     *  ################         ########........
+     *                           ################
+     */
+    function getSlopeY(tileTop: number, xInTile: number, type: SlopeType): number {
+        switch (type) {
+            case SlopeType.RightRising:
+                // Surface goes from bottom-left to top-right (45°)
+                // x=0  → tileTop+15,  x=15 → tileTop+0
+                return tileTop + 15 - xInTile
+
+            case SlopeType.LeftRising:
+                // Surface goes from top-left to bottom-right (45°)
+                // x=0  → tileTop+0,   x=15 → tileTop+15
+                return tileTop + xInTile
+
+            case SlopeType.GentleRightLow:
+                // Lower-left tile of a 2:1 gentle / slope
+                // x=0  → tileTop+15,  x=15 → tileTop+8
+                return tileTop + 15 - Math.idiv(xInTile, 2)
+
+            case SlopeType.GentleRightHigh:
+                // Upper-right tile of a 2:1 gentle / slope
+                // x=0  → tileTop+7,   x=15 → tileTop+0
+                return tileTop + 7 - Math.idiv(xInTile, 2)
+
+            case SlopeType.GentleLeftHigh:
+                // Upper-left tile of a 2:1 gentle \ slope
+                // x=0  → tileTop+0,   x=15 → tileTop+7
+                return tileTop + Math.idiv(xInTile, 2)
+
+            case SlopeType.GentleLeftLow:
+                // Lower-right tile of a 2:1 gentle \ slope
+                // x=0  → tileTop+8,   x=15 → tileTop+15
+                return tileTop + 8 + Math.idiv(xInTile, 2)
+
+            default:
+                return tileTop
+        }
+    }
+
+    // =========================================================================
     // Core Update
     // =========================================================================
 
@@ -92,26 +184,32 @@ namespace platformer {
         if (!st) return
 
         // ── Ground detection
+        // st.onSlope is set by slope overlap callbacks which fire before
+        // game.onUpdate in MakeCode Arcade's event loop, so it's already
+        // populated for this frame by the time we read it here.
         const wasOnGround = st.isOnGround
-        st.isOnGround = sprite.isHittingTile(CollisionDirection.Bottom)
+        const flatGround = sprite.isHittingTile(CollisionDirection.Bottom)
+        st.isOnGround = flatGround || st.onSlope
+
+        // Clear onSlope — overlap callbacks will re-set it next frame
+        st.onSlope = false
 
         if (!wasOnGround && st.isOnGround) {
             st.jumpsLeft = st.maxJumps
             st.canDash = true
-            // Landing cancels climbing
             if (st.isClimbing) {
                 st.isClimbing = false
                 sprite.setFlag(SpriteFlag.GhostThroughWalls, false)
             }
         }
 
-        // ── If we left the ladder tile area, stop climbing
+        // ── Leave ladder if tile no longer overlapping
         if (st.isClimbing && !st.nearLadder) {
             st.isClimbing = false
             sprite.setFlag(SpriteFlag.GhostThroughWalls, false)
         }
 
-        // Reset nearLadder every frame — overlap callbacks re-set it
+        // Reset nearLadder — ladder overlap callback re-sets it each frame
         st.nearLadder = false
 
         // ── Coyote time (not while climbing)
@@ -130,7 +228,7 @@ namespace platformer {
             }
         }
 
-        // ── Climbing mode: skip gravity, lock X to center of ladder
+        // ── Climbing mode: gravity off, snap to ladder center
         if (st.isClimbing) {
             sprite.vy = 0
             if (st.ladderSnapX) {
@@ -139,10 +237,16 @@ namespace platformer {
             return
         }
 
-        // ── Gravity (skip while dashing)
+        // ── Gravity
         if (!st.isDashing) {
-            sprite.vy += (st.gravity * dt) / 1000
-            if (sprite.vy > st.maxFallSpeed) sprite.vy = st.maxFallSpeed
+            // Don't accumulate downward velocity while grounded —
+            // this prevents vy buildup that causes jitter on slopes
+            if (st.isOnGround && sprite.vy > 0) {
+                sprite.vy = 0
+            } else {
+                sprite.vy += (st.gravity * dt) / 1000
+                if (sprite.vy > st.maxFallSpeed) sprite.vy = st.maxFallSpeed
+            }
         }
 
         // ── Wall slide
@@ -232,9 +336,9 @@ namespace platformer {
     // =========================================================================
 
     /**
-     * Make the sprite jump. Respects double-jump, coyote time,
-     * and jump buffering. If called while climbing a ladder,
-     * the sprite dismounts and jumps.
+     * Make the sprite jump. Respects double-jump, coyote time, and jump
+     * buffering. If called while climbing a ladder the sprite dismounts
+     * and jumps.
      * @param sprite the player sprite
      */
     //% group="Jumping"
@@ -244,7 +348,7 @@ namespace platformer {
     export function jump(sprite: Sprite): void {
         const st = getState(sprite)
 
-        // Dismount ladder jump
+        // Dismount ladder
         if (st.isClimbing) {
             st.isClimbing = false
             sprite.setFlag(SpriteFlag.GhostThroughWalls, false)
@@ -294,10 +398,10 @@ namespace platformer {
     }
 
     /**
-     * Set coyote time — grace period after walking off a ledge
+     * Set coyote time — grace period after walking off a ledge or slope
      * where the player can still jump.
      * @param sprite the player sprite
-     * @param ms milliseconds of coyote time, eg: 100
+     * @param ms milliseconds, eg: 100
      */
     //% group="Jumping"
     //% block="set $sprite coyote time to $ms ms"
@@ -312,7 +416,7 @@ namespace platformer {
      * Set jump buffer — pressing jump this many ms before landing
      * still triggers a jump on touchdown.
      * @param sprite the player sprite
-     * @param ms milliseconds of buffer, eg: 100
+     * @param ms milliseconds, eg: 100
      */
     //% group="Jumping"
     //% block="set $sprite jump buffer to $ms ms"
@@ -329,10 +433,10 @@ namespace platformer {
 
     /**
      * Register a tile image as a climbable ladder for a sprite.
-     * Call this once during setup — it hooks the overlap event so the
-     * extension knows when the sprite is touching a ladder tile.
+     * Call once during setup. The tile must be a non-wall tile in the
+     * tilemap editor — the extension handles collision manually.
      * @param sprite the player sprite
-     * @param tile the ladder tile image from your tilemap
+     * @param tile the ladder tile from your tilemap
      */
     //% group="Ladder"
     //% block="register ladder tile $tile for $sprite"
@@ -340,21 +444,17 @@ namespace platformer {
     //% tile.shadow=tileset_tile_picker
     //% weight=100
     export function registerLadderTile(sprite: Sprite, tile: Image): void {
-        const st = getState(sprite)
-        // Fires every frame the sprite overlaps the tile
         scene.onOverlapTile(sprite.kind(), tile, function (s: Sprite, location: tiles.Location) {
-            if (s === sprite) {
-                const stateCurrent = getState(sprite)
-                stateCurrent.nearLadder = true
-                // Store the horizontal center of the ladder tile so we can snap to it
-                stateCurrent.ladderCenterX = location.column * 16 + 8
-            }
+            if (s !== sprite) return
+            const st = getState(sprite)
+            st.nearLadder = true
+            st.ladderCenterX = location.column * 16 + 8
         })
     }
 
     /**
      * Grab the ladder — the sprite enters climbing mode.
-     * Call this when the player presses Up or Down while nearLadder is true.
+     * Call when the player presses Up or Down while near a ladder.
      * Does nothing if the sprite is not near a ladder tile.
      * @param sprite the player sprite
      */
@@ -368,7 +468,6 @@ namespace platformer {
         st.isClimbing = true
         sprite.vy = 0
         sprite.vx = 0
-        // Ghost through wall tiles so the sprite can pass ladder tops freely
         sprite.setFlag(SpriteFlag.GhostThroughWalls, false)
     }
 
@@ -388,10 +487,10 @@ namespace platformer {
 
     /**
      * Climb up or down the ladder. Call every frame while Up or Down
-     * is held. Positive speed = climb down, negative speed = climb up.
-     * Automatically calls grabLadder if the sprite is near one.
+     * is held. Negative speed = climb up, positive = climb down.
+     * Automatically grabs the ladder if near one.
      * @param sprite the player sprite
-     * @param speed vertical climb speed — negative = up, positive = down, eg: -60
+     * @param speed climb velocity — negative = up, positive = down, eg: -60
      */
     //% group="Ladder"
     //% block="climb $sprite at speed $speed"
@@ -406,7 +505,7 @@ namespace platformer {
     }
 
     /**
-     * Set the default climb speed used as a reference value.
+     * Set the default climb speed reference value.
      * @param sprite the player sprite
      * @param speed pixels per second, eg: 60
      */
@@ -420,7 +519,7 @@ namespace platformer {
     }
 
     /**
-     * Set the jump force applied when jumping off a ladder.
+     * Set the jump force when jumping off a ladder.
      * @param sprite the player sprite
      * @param force upward force (negative = up), eg: -280
      */
@@ -434,10 +533,10 @@ namespace platformer {
     }
 
     /**
-     * Enable or disable snapping the sprite to the horizontal
-     * center of the ladder tile while climbing.
+     * Enable or disable snapping the sprite to the horizontal center
+     * of the ladder tile while climbing.
      * @param sprite the player sprite
-     * @param enabled true to snap to center, eg: true
+     * @param enabled true to snap to center
      */
     //% group="Ladder"
     //% block="set $sprite ladder snap to center $enabled"
@@ -462,7 +561,6 @@ namespace platformer {
 
     /**
      * Returns true if the sprite is touching a ladder tile this frame.
-     * Use this to decide whether to call grabLadder or climbLadder.
      * @param sprite the player sprite
      */
     //% group="Ladder"
@@ -471,6 +569,111 @@ namespace platformer {
     //% weight=75
     export function isNearLadder(sprite: Sprite): boolean {
         return getState(sprite).nearLadder
+    }
+
+    // =========================================================================
+    // SECTION: Slopes
+    // =========================================================================
+
+    /**
+     * Register a tile as a slope for a sprite.
+     * The tile MUST be a non-wall tile in the tilemap editor —
+     * the extension handles the surface collision manually.
+     *
+     * Slope tile layout guide (each tile is 16×16 px):
+     *
+     *   RightRising (/)    — full 45° uphill going right
+     *   LeftRising  (\)    — full 45° uphill going left
+     *
+     *   Gentle / pair  (2 tiles wide, half angle going right):
+     *     GentleRightLow  = the LEFT  tile (lower portion)
+     *     GentleRightHigh = the RIGHT tile (upper portion)
+     *
+     *   Gentle \ pair  (2 tiles wide, half angle going left):
+     *     GentleLeftHigh  = the LEFT  tile (upper portion)
+     *     GentleLeftLow   = the RIGHT tile (lower portion)
+     *
+     * @param sprite the player sprite
+     * @param tile the slope tile from your tilemap
+     * @param type the slope direction and steepness
+     */
+    //% group="Slopes"
+    //% block="register slope tile $tile type $type for $sprite"
+    //% sprite.shadow=variables_get
+    //% tile.shadow=tileset_tile_picker
+    //% weight=100
+    export function registerSlopeTile(sprite: Sprite, tile: Image, type: SlopeType): void {
+        const st = getState(sprite)
+        st.slopeRegistrations.push({ tile, type })
+
+        scene.onOverlapTile(sprite.kind(), tile, function (s: Sprite, location: tiles.Location) {
+            if (s !== sprite) return
+
+            const tileSize = 16
+            const tileLeft = location.column * tileSize
+            const tileTop = location.row * tileSize
+
+            // Clamp sprite center X to within the tile's horizontal span
+            const xInTile = Math.max(0, Math.min(tileSize - 1, Math.round(s.x) - tileLeft))
+
+            // Get the slope surface Y at this horizontal position
+            const surfaceY = getSlopeY(tileTop, xInTile, type)
+            const spriteFeetY = Math.round(s.y) + s.height / 2
+
+            // Apply correction if:
+            //   (a) sprite feet are at or past the surface (inside/below slope)
+            //   (b) sprite is not in the middle of a jump (vy not strongly negative)
+            // The -4 threshold handles walking up a slope where feet approach
+            // from slightly above before the overlap fires.
+            if (spriteFeetY >= surfaceY - 4 && s.vy > -200) {
+                // Push sprite up to sit exactly on the surface
+                s.y = surfaceY - s.height / 2
+
+                // Kill downward velocity — sprite is grounded on slope
+                if (s.vy > 0) s.vy = 0
+
+                const state = getState(s)
+                state.onSlope = true
+                state.isOnGround = true
+
+                if (!state.isClimbing) {
+                    state.jumpsLeft = state.maxJumps
+                    state.canDash = true
+                    // Refresh coyote timer while on slope so walking off gives grace
+                    state.coyoteTimer = state.coyoteTime
+                }
+            }
+        })
+    }
+
+    /**
+     * Remove all slope tile registrations for a sprite.
+     * Useful when transitioning to a different tilemap scene.
+     * Note: the underlying tile overlap handlers remain active
+     * but will no longer affect the sprite's physics.
+     * @param sprite the player sprite
+     */
+    //% group="Slopes"
+    //% block="clear $sprite slope registrations"
+    //% sprite.shadow=variables_get
+    //% weight=88
+    export function clearSlopeRegistrations(sprite: Sprite): void {
+        getState(sprite).slopeRegistrations = []
+    }
+
+    /**
+     * Returns true if the sprite is currently standing on a slope tile.
+     * @param sprite the player sprite
+     */
+    //% group="Slopes"
+    //% block="$sprite is on slope"
+    //% sprite.shadow=variables_get
+    //% weight=85
+    export function isOnSlope(sprite: Sprite): boolean {
+        // onSlope is set by the overlap callback and cleared in update().
+        // Query it before update() runs (e.g. in a game.onUpdate registered
+        // before setup()) or rely on the isOnGround block for general use.
+        return getState(sprite).onSlope
     }
 
     // =========================================================================
@@ -572,6 +775,7 @@ namespace platformer {
     /**
      * Dash in the direction the sprite is currently facing.
      * Gravity is disabled during the dash. One dash per air trip.
+     * Cannot dash while climbing a ladder.
      * @param sprite the player sprite
      */
     //% group="Dash"
@@ -581,7 +785,7 @@ namespace platformer {
     export function dash(sprite: Sprite): void {
         const st = getState(sprite)
         if (!st.canDash || st.isDashing || st.dashCooldownTimer > 0) return
-        if (st.isClimbing) return     // no dashing off ladders
+        if (st.isClimbing) return
         st.isDashing = true
         st.canDash = false
         st.dashTimer = st.dashDuration
@@ -664,7 +868,7 @@ namespace platformer {
 
     /**
      * Move the sprite left or right. Tracks facing direction for dash.
-     * Skips during an active dash. Reduces horizontal speed while climbing.
+     * Skips during a dash. Reduces speed while climbing a ladder.
      * @param sprite the player sprite
      * @param speed positive = right, negative = left, eg: 150
      */
@@ -677,7 +881,6 @@ namespace platformer {
         const st = getState(sprite)
         if (st.isDashing) return
         if (st.isClimbing) {
-            // Allow slight horizontal movement on ladder but don't cancel climb
             sprite.vx = speed * 0.3
             return
         }
@@ -717,7 +920,8 @@ namespace platformer {
     // =========================================================================
 
     /**
-     * Returns true if the sprite is standing on the ground.
+     * Returns true if the sprite is standing on the ground
+     * (flat tile OR slope tile).
      * @param sprite the player sprite
      */
     //% group="Detection"
@@ -726,6 +930,20 @@ namespace platformer {
     //% weight=100
     export function isOnGround(sprite: Sprite): boolean {
         return getState(sprite).isOnGround
+    }
+
+    /**
+     * Returns true if the sprite is standing on a slope tile specifically.
+     * @param sprite the player sprite
+     */
+    //% group="Detection"
+    //% block="$sprite is on slope"
+    //% sprite.shadow=variables_get
+    //% weight=97
+    export function isOnSlopeGround(sprite: Sprite): boolean {
+        // Re-exposed here for the Detection section alongside the other ground checks.
+        // The Slopes section version is the same function.
+        return getState(sprite).onSlope
     }
 
     /**
@@ -809,7 +1027,8 @@ namespace platformer {
     }
 
     /**
-     * Add an impulse to the sprite. Useful for bouncy platforms.
+     * Add an impulse to the sprite. Useful for bouncy platforms
+     * and explosion blasts.
      * @param sprite the player sprite
      * @param vx horizontal impulse, eg: 0
      * @param vy vertical impulse (negative = up), eg: -200
@@ -848,8 +1067,7 @@ namespace platformer {
     //% sprite.shadow=variables_get
     //% weight=80
     export function restoreJumps(sprite: Sprite): void {
-        const st = getState(sprite)
-        st.jumpsLeft = st.maxJumps
+        getState(sprite).jumpsLeft = getState(sprite).maxJumps
     }
 
     // =========================================================================
@@ -858,6 +1076,7 @@ namespace platformer {
 
     /**
      * Knock the sprite back — direction is reversed from current facing.
+     * Cancels climbing and slope grounding.
      * @param sprite the player sprite
      * @param forceX horizontal knockback speed, eg: 200
      * @param forceY vertical knockback (negative = up), eg: -150
@@ -870,17 +1089,18 @@ namespace platformer {
     //% weight=100
     export function knockback(sprite: Sprite, forceX: number, forceY: number): void {
         const st = getState(sprite)
-        // Knockback cancels climbing
         if (st.isClimbing) {
             st.isClimbing = false
             sprite.setFlag(SpriteFlag.GhostThroughWalls, false)
         }
+        st.onSlope = false
         sprite.vx = st.facingRight ? -Math.abs(forceX) : Math.abs(forceX)
         sprite.vy = forceY
     }
 
     /**
      * Knock the sprite away from a source position.
+     * Cancels climbing and slope grounding.
      * @param sprite the player sprite
      * @param sourceX X of the damage source, eg: 0
      * @param sourceY Y of the damage source, eg: 0
@@ -904,6 +1124,7 @@ namespace platformer {
             st.isClimbing = false
             sprite.setFlag(SpriteFlag.GhostThroughWalls, false)
         }
+        st.onSlope = false
         const dx = sprite.x - sourceX
         const dy = sprite.y - sourceY
         const len = Math.sqrt(dx * dx + dy * dy) || 1
@@ -913,6 +1134,7 @@ namespace platformer {
 
     /**
      * Launch the sprite upward — for bounce pads or stomp bounces.
+     * Cancels climbing and slope grounding.
      * @param sprite the player sprite
      * @param force upward launch speed (positive, direction auto-applied), eg: 350
      */
@@ -927,6 +1149,7 @@ namespace platformer {
             st.isClimbing = false
             sprite.setFlag(SpriteFlag.GhostThroughWalls, false)
         }
+        st.onSlope = false
         sprite.vy = -Math.abs(force)
         st.jumpsLeft = st.maxJumps
     }
