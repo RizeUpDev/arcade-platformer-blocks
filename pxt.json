@@ -1,6 +1,6 @@
 {
     "name": "arcade-platformer-blocks",
-    "description": "Advanced platformer mechanics for MakeCode Arcade: double jump, wall slide, dash, coyote time & more.",
+    "description": "Its now easy to make platfomers!",
     "license": "MIT",
     "dependencies": {
         "device": "*"
@@ -13,7 +13,7 @@
         "test.ts"
     ],
     "targetVersions": {
-        "target": "4.0.12",
+        "target": "4.0.14",
         "targetId": "arcade"
     },
     "supportedTargets": [
